@@ -71,7 +71,7 @@ class Model(ModelDesc):
 
             # B * S * H
             outputs = tf.stack(outputs, axis=1)
-            outputs = tf.Print(outputs, [tf.shape(outputs)], summarize=10)
+            # outputs = tf.Print(outputs, [tf.shape(outputs)], summarize=10)
             dense = slim.fully_connected(tf.reshape(outputs, [-1, hidden_dim]), 2 * Z_DIM * MIX_GAUSSIANS + MIX_GAUSSIANS, activation_fn=None)
             mean = tf.reshape(dense[:, :Z_DIM * MIX_GAUSSIANS], [-1, MIX_GAUSSIANS, Z_DIM])
             sigma = tf.reshape(tf.exp(dense[:, Z_DIM * MIX_GAUSSIANS:2*Z_DIM * MIX_GAUSSIANS]), [-1, MIX_GAUSSIANS, Z_DIM])
