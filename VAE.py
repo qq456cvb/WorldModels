@@ -17,7 +17,7 @@ import cv2
 import matplotlib.pyplot as plt
 
 STEPS_PER_EPOCH = 100
-BATCH_SIZE = 32
+BATCH_SIZE = 256
 
 
 class GymDataflow(RNGDataFlow):
@@ -27,14 +27,22 @@ class GymDataflow(RNGDataFlow):
     def get_data(self):
         while True:
             self.env.reset()
+            i = 0
             while True:
                 action = self.env.action_space.sample()
                 observation, reward, done, info = self.env.step(action)
-                img = cv2.resize(observation, (64, 64))
+                img = observation
+                img = cv2.resize(img, (64, 64))
                 img = img.astype(np.float32) / 255.
+                i += 1
+                # if i < 200:
+                #     continue
                 yield [img]
-                if done:
+
+                if i > 300:
                     break
+                # if done:
+                #     break
 
 
 class Model(ModelDesc):
@@ -53,36 +61,41 @@ class Model(ModelDesc):
                 l = slim.flatten(l)
 
                 mean = slim.fully_connected(l, 32, None)
-                std_var = slim.fully_connected(l, 32, None)
+                log_var = slim.fully_connected(l, 32, None)
+                std_var = tf.exp(log_var / 2)
                 encoding = tf.identity(mean, name='encoding')
 
                 # is_training = get_current_tower_context().is_training
                 # if not is_training:
                 #     return
 
-                z = tf.random_normal([32]) * std_var + mean
+                z = tf.random_normal(tf.shape(mean)) * std_var + mean
                 z = slim.fully_connected(z, 1024, None)
 
                 l = tf.reshape(z, [-1, 1, 1, 1024])
                 l = slim.conv2d_transpose(l, 128, 5, 2, 'VALID')
                 l = slim.conv2d_transpose(l, 64, 5, 2, 'VALID')
                 l = slim.conv2d_transpose(l, 32, 6, 2, 'VALID')
-                l = slim.conv2d_transpose(l, 3, 6, 2, 'VALID')
+                l = slim.conv2d_transpose(l, 3, 6, 2, 'VALID', activation_fn=None)
 
                 output = tf.sigmoid(l, name='output')
 
-        reconstruct_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=img, logits=l)
-        reconstruct_loss = tf.reduce_sum(reconstruct_loss, name='reconstruct_loss')
-        # l2_loss = tf.identity(regularize_cost_from_collection(), name='l2_loss')
+        kl_loss = -0.5 * (1 + log_var - tf.square(mean) - tf.exp(log_var))
+        kl_loss = tf.reduce_sum(kl_loss, axis=-1)
+        kl_loss = tf.reduce_mean(kl_loss, axis=0, name='kl_loss')
+        reconstruct_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=img, logits=l), axis=[1, 2, 3])
+        reconstruct_loss = tf.reduce_mean(reconstruct_loss, name='reconstruct_loss')
+        l2_loss = tf.identity(regularize_cost_from_collection(), name='l2_loss')
         add_moving_summary(reconstruct_loss)
-        # add_moving_summary(l2_loss)
-        loss = reconstruct_loss
+        add_moving_summary(l2_loss)
+        add_moving_summary(kl_loss)
+        loss = reconstruct_loss + kl_loss
         return loss
 
     def optimizer(self):
-        lr = tf.get_variable('learning_rate', initializer=1e-4, trainable=False)
-        opt = tf.train.AdamOptimizer(lr)
-        gradprocs = [MapGradient(lambda grad: tf.clip_by_average_norm(grad, 0.3))]
+        lr = tf.get_variable('learning_rate', initializer=1e-3, trainable=False)
+        opt = tf.train.GradientDescentOptimizer(lr)
+        gradprocs = [MapGradient(lambda grad: tf.clip_by_average_norm(grad, 0.5))]
         # SummaryGradient()]
         opt = optimizer.apply_grad_processors(opt, gradprocs)
         return opt
@@ -127,8 +140,38 @@ def train():
 
 
 if __name__ == '__main__':
-    # train()
+    train()
     env = gym.make('CarRacing-v0')
+    pred = OfflinePredictor(PredictConfig(
+        model=Model(),
+        session_init=get_model_loader('train_log/auto_encoder/model-300'),
+        input_names=['state_in'],
+        output_names=['AutoEncoder/output']
+    ))
+    while True:
+        env.reset()
+        while True:
+            action = env.action_space.sample()
+            observation, reward, done, info = env.step(action)
+            img = observation
+            cv2.imshow('origin', img)
+            # cv2.waitKey(30)
+            img = cv2.resize(img, (64, 64))
+            img = img.astype(np.float32) / 255.
+            reconstruction = pred([img[None, :, :, :]])[0][0]
+            # plt.imshow(img)
+            # plt.imshow(reconstruction)
+            cv2.imshow('recons', reconstruction)
+            cv2.waitKey()
+            # plt.show()
+            if done:
+                break
+    # # env.reset()
+    # # while True:
+    # #     action = env.action_space.sample()
+    # #     observation, reward, done, info = env.step(action)
+    # #     cv2.imshow('test', observation)
+    # #     cv2.waitKey(30)
     # model = Model()
     # state_in = model.inputs()[0]
     # model.build_graph(state_in)
@@ -141,14 +184,20 @@ if __name__ == '__main__':
     #         while True:
     #             action = env.action_space.sample()
     #             observation, reward, done, info = env.step(action)
-    #             img = cv2.resize(observation, (64, 64))
+    #             img = observation
+    #             cv2.imshow('origin', img)
+    #             # cv2.waitKey(30)
+    #             img = cv2.resize(img, (64, 64))
     #             img = img.astype(np.float32) / 255.
     #             reconstruction = sess.run(out, feed_dict={state_in: img.reshape(1, 64, 64, 3)})[0]
-    #             plt.imshow(img)
+    #             # plt.imshow(img)
     #             # plt.imshow(reconstruction)
-    #             plt.show()
+    #             cv2.imshow('recons', reconstruction)
+    #             cv2.waitKey()
+    #             # plt.show()
     #             if done:
     #                 break
+
     # from tensorflow.python.client import device_lib
     #
     # print(device_lib.list_local_devices())
