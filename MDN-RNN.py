@@ -72,16 +72,17 @@ class Model(ModelDesc):
             # B * S * H
             outputs = tf.stack(outputs, axis=1)
             # outputs = tf.Print(outputs, [tf.shape(outputs)], summarize=10)
-            dense = slim.fully_connected(tf.reshape(outputs, [-1, hidden_dim]), 2 * Z_DIM * MIX_GAUSSIANS + MIX_GAUSSIANS, activation_fn=None)
+            # elements in in z are independent mix-gaussians
+            dense = slim.fully_connected(tf.reshape(outputs, [-1, hidden_dim]), 3 * Z_DIM * MIX_GAUSSIANS, activation_fn=None)
             mean = tf.reshape(dense[:, :Z_DIM * MIX_GAUSSIANS], [-1, MIX_GAUSSIANS, Z_DIM])
             sigma = tf.reshape(tf.exp(dense[:, Z_DIM * MIX_GAUSSIANS:2*Z_DIM * MIX_GAUSSIANS]), [-1, MIX_GAUSSIANS, Z_DIM])
-            pi = tf.nn.softmax(dense[:, -MIX_GAUSSIANS:])
+            pi = tf.nn.softmax(tf.reshape(dense[:, -Z_DIM * MIX_GAUSSIANS:], [-1, MIX_GAUSSIANS, Z_DIM]), axis=1)
 
             # sample from mixture of gaussian
             z = tf.reshape(tf.tile(z_target, [1, 1, MIX_GAUSSIANS]), [-1, MIX_GAUSSIANS, Z_DIM])
-            z = tf.Print(z, [tf.shape(z), tf.shape(mean)], summarize=10)
+            # z = tf.Print(z, [tf.shape(z), tf.shape(mean)], summarize=10)
             # a const positive scalar (2pi)^(-D/2) is omitted
-            probs = tf.expand_dims(pi, axis=-1) * tf.exp(-tf.square(z - mean) / (2 * tf.square(sigma) + 1e-8)) / (sigma + 1e-8)
+            probs = pi * tf.exp(-tf.square(z - mean) / (2 * tf.square(sigma) + 1e-8)) / (sigma + 1e-8)
 
             # (B * S) * Z
             probs = tf.reduce_sum(probs, axis=1)

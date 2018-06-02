@@ -35,14 +35,14 @@ class GymDataflow(RNGDataFlow):
                 img = cv2.resize(img, (64, 64))
                 img = img.astype(np.float32) / 255.
                 i += 1
-                # if i < 200:
-                #     continue
+                if self.env.env.t < 1.:
+                    continue
                 yield [img]
 
-                if i > 300:
-                    break
-                # if done:
+                # if i > 3000:
                 #     break
+                if done:
+                    break
 
 
 class Model(ModelDesc):
@@ -70,7 +70,7 @@ class Model(ModelDesc):
                 #     return
 
                 z = tf.random_normal(tf.shape(mean)) * std_var + mean
-                z = slim.fully_connected(z, 1024, None)
+                z = slim.fully_connected(z, 1024)
 
                 l = tf.reshape(z, [-1, 1, 1, 1024])
                 l = slim.conv2d_transpose(l, 128, 5, 2, 'VALID')
@@ -83,7 +83,10 @@ class Model(ModelDesc):
         kl_loss = -0.5 * (1 + log_var - tf.square(mean) - tf.exp(log_var))
         kl_loss = tf.reduce_sum(kl_loss, axis=-1)
         kl_loss = tf.reduce_mean(kl_loss, axis=0, name='kl_loss')
-        reconstruct_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=img, logits=l), axis=[1, 2, 3])
+        # gaussian mse loss
+        reconstruct_loss = tf.reduce_sum(tf.square(img - output), axis=[1, 2, 3])
+        # entropy loss
+        # reconstruct_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=img, logits=l), axis=[1, 2, 3])
         reconstruct_loss = tf.reduce_mean(reconstruct_loss, name='reconstruct_loss')
         l2_loss = tf.identity(regularize_cost_from_collection(), name='l2_loss')
         add_moving_summary(reconstruct_loss)
@@ -122,7 +125,7 @@ def train():
     else:
         dataflow = PrefetchDataZMQ(dataflow, nr_proc=multiprocessing.cpu_count() // 2)
     dataflow = BatchData(dataflow, BATCH_SIZE)
-    config = TrainConfig(
+    config = AutoResumeTrainConfig(
         model=Model(),
         dataflow=dataflow,
         callbacks=[
@@ -133,18 +136,18 @@ def train():
             # HumanHyperParamSetter('learning_rate'),
         ],
         steps_per_epoch=STEPS_PER_EPOCH,
-        max_epoch=100,
+        max_epoch=200,
     )
     trainer = AsyncMultiGPUTrainer(train_tower) if nr_gpu > 1 else SimpleTrainer()
     launch_train_with_config(config, trainer)
 
 
 if __name__ == '__main__':
-    train()
+    # train()
     env = gym.make('CarRacing-v0')
     pred = OfflinePredictor(PredictConfig(
         model=Model(),
-        session_init=get_model_loader('train_log/auto_encoder/model-300'),
+        session_init=get_model_loader('train_log/auto_encoder/checkpoint'),
         input_names=['state_in'],
         output_names=['AutoEncoder/output']
     ))
@@ -153,6 +156,8 @@ if __name__ == '__main__':
         while True:
             action = env.action_space.sample()
             observation, reward, done, info = env.step(action)
+            if env.env.t < 1.:
+                continue
             img = observation
             cv2.imshow('origin', img)
             # cv2.waitKey(30)
@@ -162,7 +167,7 @@ if __name__ == '__main__':
             # plt.imshow(img)
             # plt.imshow(reconstruction)
             cv2.imshow('recons', reconstruction)
-            cv2.waitKey()
+            cv2.waitKey(10)
             # plt.show()
             if done:
                 break
