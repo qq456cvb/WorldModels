@@ -15,37 +15,71 @@ import numpy as np
 import gym
 import cv2
 import tensorflow.contrib.rnn as rnn
+import VAE
 
 STEPS_PER_EPOCH = 100
 BATCH_SIZE = 8
-ACTION_DIM = 4
+ACTION_DIM = 3
 Z_DIM = 32
 SEQ_LEN = 20
 MIX_GAUSSIANS = 5
 
 
-class RNNDataflow(RNGDataFlow):
+class RNNDataflow(RNGDataFlow, Callback):
     def __init__(self, env):
         self.env = env
+        # self.pred = OnlinePredictor(PredictConfig(
+        #     model=FusedModel(),
+        #     session_init=get_model_loader('train_log/auto_encoder/checkpoint'),
+        #     input_names=['state_in'],
+        #     output_names=['AutoEncoder/encoding']
+        # ))
+
+    def _setup_graph(self):
+        # op = self.graph.get_operations()
+        # print([m.values() for m in op])
+        self.pred = self.trainer.get_predictor(
+            ['state_in'], ['AutoEncoder/encoding'])
+        # OnlinePredictor(['state_in:0'], ['tower0/AutoEncoder/output:0'])
 
     def get_data(self):
         while True:
+            episode_z_buffer = []
+            episode_a_buffer = []
             self.env.reset()
+            # observation = self.env.state
+            # img = cv2.resize(observation, (64, 64))
+            # img = img.astype(np.float32) / 255.
+            # episode_z_buffer.append(self.pred([img[None, :, :, :]])[0][0])
             while True:
                 action = self.env.action_space.sample()
                 observation, reward, done, info = self.env.step(action)
-                # img = cv2.resize(observation, (64, 64))
-                # img = img.astype(np.float32) / 255.
+                img = cv2.resize(observation, (64, 64))
+                img = img.astype(np.float32) / 255.
+
+                if self.env.env.t < 1.:
+                    continue
+
+                episode_a_buffer.append(action)
+                episode_z_buffer.append(self.pred([img[None, :, :, :]])[0][0])
+
                 if done:
-                    yield [np.zeros([SEQ_LEN], dtype=np.int32),
-                           np.zeros([SEQ_LEN, Z_DIM], dtype=np.float32),
-                           np.zeros([SEQ_LEN, Z_DIM], dtype=np.float32)]
+                    episode_a_buffer.pop(0)
+                    episode_a = np.asarray(episode_a_buffer, dtype=np.float32)
+                    episode_z = np.asarray(episode_z_buffer, dtype=np.float32)
+                    for i in range(len(episode_a_buffer) // SEQ_LEN + 1):
+                        sample_idx = np.random.randint(len(episode_a_buffer), size=SEQ_LEN)
+                        # print(len(episode_a_buffer))
+                        yield [np.zeros([64, 64, 3], dtype=np.float32),
+                                episode_a[sample_idx],
+                                episode_z[sample_idx],
+                                episode_z[sample_idx + 1]]
                     break
 
 
 class Model(ModelDesc):
     def inputs(self):
-        return [tf.placeholder(tf.int32, [None, SEQ_LEN], 'action_input'),
+        return [tf.placeholder(tf.float32, [None, SEQ_LEN, ACTION_DIM], 'action_input'),
                 tf.placeholder(tf.float32, [None, SEQ_LEN, Z_DIM], 'z_input'),
                 tf.placeholder(tf.float32, [None, SEQ_LEN, Z_DIM], 'z_target')]
 
@@ -59,7 +93,7 @@ class Model(ModelDesc):
                                             tf.placeholder_with_default(
                                                 tf.zeros(tf.stack([tf.shape(action)[0], hidden_dim]), name='hz'),
                                                 shape=[None, hidden_dim], name='h'))
-            x = tf.concat([tf.one_hot(action, ACTION_DIM), z_in], axis=-1)
+            x = tf.concat([slim.fully_connected(action, 32), z_in], axis=-1)
             x_list = tf.unstack(x, axis=1)
 
             outputs, last_state = rnn.static_rnn(cell, x_list, init_state)
@@ -101,6 +135,23 @@ class Model(ModelDesc):
         return opt
 
 
+class FusedModel(ModelDesc):
+    def __init__(self):
+        self.mdn_rnn_model = Model()
+        self.vae_model = VAE.Model()
+
+    def inputs(self):
+        return self.vae_model.inputs() + self.mdn_rnn_model.inputs()
+
+    def build_graph(self, img, action, z_in, z_target):
+        self.vae_model.build_graph(img)
+        return self.mdn_rnn_model.build_graph(action, z_in, z_target)
+
+    def optimizer(self):
+        return self.mdn_rnn_model.optimizer()
+
+
+
 def train():
     dirname = os.path.join('train_log', 'mdn-rnn')
     logger.set_logger_dir(dirname)
@@ -115,23 +166,25 @@ def train():
         logger.warn("Without GPU this model will never learn! CPU is only useful for debug.")
         train_tower = [0], [0]
 
-    dataflow = RNNDataflow(gym.make('CarRacing-v0'))
-    if os.name == 'nt':
-        dataflow = PrefetchData(dataflow, nr_proc=multiprocessing.cpu_count() // 2,
-                                nr_prefetch=multiprocessing.cpu_count() // 2)
-    else:
-        dataflow = PrefetchDataZMQ(dataflow, nr_proc=multiprocessing.cpu_count() // 2)
-    dataflow = BatchData(dataflow, BATCH_SIZE)
+    ds = RNNDataflow(gym.make('CarRacing-v0'))
+    # if os.name == 'nt':
+    #     dataflow = PrefetchData(ds, nr_proc=multiprocessing.cpu_count() // 2,
+    #                             nr_prefetch=multiprocessing.cpu_count() // 2)
+    # else:
+    #     dataflow = PrefetchDataZMQ(ds, nr_proc=multiprocessing.cpu_count() // 2)
+    dataflow = BatchData(ds, BATCH_SIZE)
     config = TrainConfig(
-        model=Model(),
+        model=FusedModel(),
         dataflow=dataflow,
         callbacks=[
             ModelSaver(),
             EstimatedTimeLeft(),
+            ds,
             # ScheduledHyperParamSetter('learning_rate', [(20, 0.0003), (120, 0.0001)]),
             # ScheduledHyperParamSetter('entropy_beta', [(80, 0.005)]),
             # HumanHyperParamSetter('learning_rate'),
         ],
+        session_init=get_model_loader('train_log/auto_encoder/checkpoint'),
         steps_per_epoch=STEPS_PER_EPOCH,
         max_epoch=100,
     )
